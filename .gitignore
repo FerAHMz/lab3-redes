@@ -1,0 +1,8 @@
+# Generados en ejecución
+*_tabla_enrutamiento.csv
+__pycache__/
+*.pyc
+
+# Entorno
+.venv/
+.DS_Store
