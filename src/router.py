@@ -9,10 +9,11 @@ from transporte import ServidorLineas, enviar_json
 INTERVALO_HELLO = 5
 TIEMPO_CAIDA = 15
 INTERVALO_VIGILANCIA = 1
+TTL_LSA = 8
 
 
 class Router:
-    """Nodo de la red que descubre vecinos mediante paquetes HELLO."""
+    """Nodo de la red que descubre vecinos, difunde LSAs y mantiene la LSDB."""
 
     def __init__(self, nombre, topologia):
         self.nombre = nombre
@@ -23,6 +24,9 @@ class Router:
         self.costos_vecinos = dict(config["vecinos"])
         self.vecinos_activos = set(self.costos_vecinos)
         self.ultimo_hello = {}
+        self.seq = 0
+        self.lsdb = {}
+        self.mayor_seq = {}
         self.candado = threading.Lock()
         self.servidor = ServidorLineas(self.ip, self.puerto, self.procesar)
 
@@ -35,6 +39,8 @@ class Router:
         self.servidor.iniciar()
         threading.Thread(target=self._ciclo_hello, daemon=True).start()
         threading.Thread(target=self._vigilar_vecinos, daemon=True).start()
+        with self.candado:
+            self._emitir_lsa()
         print(f"[{self.nombre}] escuchando en {self.ip}:{self.puerto}")
 
     def procesar(self, mensaje):
@@ -42,6 +48,12 @@ class Router:
         tipo = mensaje.get("type")
         if tipo == "HELLO":
             self._procesar_hello(mensaje)
+        elif tipo == "LSA":
+            self._procesar_lsa(mensaje)
+
+    # ------------------------------------------------------------------
+    # HELLO
+    # ------------------------------------------------------------------
 
     def _ciclo_hello(self):
         while True:
@@ -84,5 +96,60 @@ class Router:
                     self._al_cambiar_vecinos()
 
     def _al_cambiar_vecinos(self):
-        """Reacciona a un cambio en el conjunto de vecinos activos."""
-        pass
+        """Ante un cambio de vecinos se anuncia un LSA nuevo. Requiere el candado."""
+        self._emitir_lsa()
+
+    # ------------------------------------------------------------------
+    # LSA y flooding
+    # ------------------------------------------------------------------
+
+    def _emitir_lsa(self):
+        """Genera el LSA propio con seq nuevo y lo difunde. Requiere el candado."""
+        self.seq += 1
+        enlaces = {
+            vecino: costo
+            for vecino, costo in self.costos_vecinos.items()
+            if vecino in self.vecinos_activos
+        }
+        lsa = {
+            "proto": "LinkState",
+            "type": "LSA",
+            "origin": self.nombre,
+            "seq": self.seq,
+            "links": enlaces,
+            "from": self.nombre,
+            "ttl": TTL_LSA,
+        }
+        self.lsdb[self.nombre] = enlaces
+        self.mayor_seq[self.nombre] = self.seq
+        self._inundar(lsa, excepto=None)
+
+    def _procesar_lsa(self, mensaje):
+        origen = mensaje.get("origin")
+        seq = mensaje.get("seq")
+        enlaces = mensaje.get("links")
+        emisor = mensaje.get("from")
+        if origen is None or seq is None or not isinstance(enlaces, dict):
+            return
+        with self.candado:
+            # El seq corta los ciclos: solo se acepta una versión más nueva.
+            if seq <= self.mayor_seq.get(origen, -1):
+                return
+            self.mayor_seq[origen] = seq
+            self.lsdb[origen] = dict(enlaces)
+            # El ttl es el respaldo contra LSAs que sobreviven al control de seq.
+            ttl = mensaje.get("ttl", TTL_LSA) - 1
+            if ttl <= 0:
+                return
+            reenvio = dict(mensaje)
+            reenvio["ttl"] = ttl
+            reenvio["from"] = self.nombre
+            self._inundar(reenvio, excepto=emisor)
+
+    def _inundar(self, lsa, excepto):
+        """Envía el LSA a todos los vecinos activos menos al que lo mandó."""
+        for vecino in self.vecinos_activos:
+            if vecino == excepto:
+                continue
+            ip, puerto = direccion_nodo(self.topologia, vecino)
+            enviar_json(ip, puerto, lsa)
