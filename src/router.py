@@ -1,9 +1,11 @@
 """Plano de control del router: protocolo Link State."""
 
+import csv
 import threading
 import time
 
 from configuracion import config_nodo, direccion_nodo
+from dijkstra import caminos_mas_cortos, siguiente_salto
 from transporte import ServidorLineas, enviar_json
 
 INTERVALO_HELLO = 5
@@ -122,6 +124,7 @@ class Router:
         }
         self.lsdb[self.nombre] = enlaces
         self.mayor_seq[self.nombre] = self.seq
+        self._recalcular()
         self._inundar(lsa, excepto=None)
 
     def _procesar_lsa(self, mensaje):
@@ -137,6 +140,7 @@ class Router:
                 return
             self.mayor_seq[origen] = seq
             self.lsdb[origen] = dict(enlaces)
+            self._recalcular()
             # El ttl es el respaldo contra LSAs que sobreviven al control de seq.
             ttl = mensaje.get("ttl", TTL_LSA) - 1
             if ttl <= 0:
@@ -153,3 +157,23 @@ class Router:
                 continue
             ip, puerto = direccion_nodo(self.topologia, vecino)
             enviar_json(ip, puerto, lsa)
+
+    # ------------------------------------------------------------------
+    # Rutas y tabla de enrutamiento
+    # ------------------------------------------------------------------
+
+    def _recalcular(self):
+        """Corre Dijkstra sobre la LSDB y reescribe la tabla. Requiere el candado."""
+        distancias, previos = caminos_mas_cortos(self.lsdb, self.nombre)
+        ruta_csv = f"{self.nombre}_tabla_enrutamiento.csv"
+        with open(ruta_csv, "w", newline="", encoding="utf-8") as archivo:
+            escritor = csv.writer(archivo)
+            escritor.writerow(["destino", "siguiente_salto", "costo", "ip", "puerto"])
+            for destino in sorted(distancias):
+                if destino == self.nombre:
+                    continue
+                salto = siguiente_salto(previos, self.nombre, destino)
+                if salto is None or destino not in self.topologia:
+                    continue
+                ip, puerto = direccion_nodo(self.topologia, salto)
+                escritor.writerow([destino, salto, distancias[destino], ip, puerto])
