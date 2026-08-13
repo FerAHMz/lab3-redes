@@ -12,6 +12,10 @@ INTERVALO_HELLO = 5
 TIEMPO_CAIDA = 15
 INTERVALO_VIGILANCIA = 1
 TTL_LSA = 8
+# Refresco periódico del LSA propio (estilo LSRefresh de OSPF). Sin esto, un LSA
+# perdido en el flooding inicial nunca se re-anuncia y los nodos lejanos quedan
+# sin aprender nuestros enlaces cuando la topología cambia con la red ya viva.
+INTERVALO_REEMISION = 10
 
 
 class Router:
@@ -41,9 +45,22 @@ class Router:
         self.servidor.iniciar()
         threading.Thread(target=self._ciclo_hello, daemon=True).start()
         threading.Thread(target=self._vigilar_vecinos, daemon=True).start()
+        threading.Thread(target=self._ciclo_reemision, daemon=True).start()
         with self.candado:
             self._emitir_lsa()
         print(f"[{self.nombre}] escuchando en {self.ip}:{self.puerto}")
+
+    def _ciclo_reemision(self):
+        """Re-anuncia el LSA propio cada INTERVALO_REEMISION segundos.
+
+        Es el respaldo contra floods perdidos: aunque no cambien los vecinos, el
+        seq sube y el anuncio vuelve a inundarse, de modo que un nodo que se sumó
+        tarde (p. ej. al cerrar un bucle) termina aprendiendo nuestros enlaces.
+        """
+        while True:
+            time.sleep(INTERVALO_REEMISION)
+            with self.candado:
+                self._emitir_lsa()
 
     def procesar(self, mensaje):
         """Despacha cada mensaje recibido según su tipo."""
