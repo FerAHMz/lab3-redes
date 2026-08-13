@@ -1,6 +1,7 @@
 """Plano de control del router: protocolo Link State."""
 
 import csv
+import os
 import threading
 import time
 
@@ -15,7 +16,10 @@ TTL_LSA = 8
 # Refresco periódico del LSA propio (estilo LSRefresh de OSPF). Sin esto, un LSA
 # perdido en el flooding inicial nunca se re-anuncia y los nodos lejanos quedan
 # sin aprender nuestros enlaces cuando la topología cambia con la red ya viva.
-INTERVALO_REEMISION = 10
+INTERVALO_REEMISION = 30
+# Directorio donde se persiste el número de secuencia del LSA propio, para que un
+# nodo que se reinicia no vuelva a numerar desde cero.
+DIRECTORIO_ESTADO = "state"
 
 
 class Router:
@@ -30,11 +34,37 @@ class Router:
         self.costos_vecinos = dict(config["vecinos"])
         self.vecinos_activos = set(self.costos_vecinos)
         self.ultimo_hello = {}
-        self.seq = 0
+        # El seq no vuelve a cero al reiniciar: se retoma el último valor
+        # persistido para que la red no descarte nuestros LSA nuevos por "viejos".
+        self.seq = self._cargar_seq()
         self.lsdb = {}
         self.mayor_seq = {}
         self.candado = threading.Lock()
         self.servidor = ServidorLineas(self.ip, self.puerto, self.procesar)
+
+    # ------------------------------------------------------------------
+    # Persistencia del número de secuencia
+    # ------------------------------------------------------------------
+
+    def _ruta_seq(self):
+        return os.path.join(DIRECTORIO_ESTADO, f"{self.nombre}_seq.txt")
+
+    def _cargar_seq(self):
+        """Lee el último seq persistido; 0 si no existe o está corrupto."""
+        try:
+            with open(self._ruta_seq(), encoding="utf-8") as archivo:
+                return int(archivo.read().strip())
+        except (FileNotFoundError, ValueError):
+            return 0
+
+    def _guardar_seq(self):
+        """Persiste el seq propio de forma atómica (escribe y renombra)."""
+        os.makedirs(DIRECTORIO_ESTADO, exist_ok=True)
+        ruta = self._ruta_seq()
+        temporal = f"{ruta}.tmp"
+        with open(temporal, "w", encoding="utf-8") as archivo:
+            archivo.write(str(self.seq))
+        os.replace(temporal, ruta)
 
     def iniciar(self):
         # Al arrancar se da un margen de TIEMPO_CAIDA a cada vecino
@@ -141,6 +171,7 @@ class Router:
         }
         self.lsdb[self.nombre] = enlaces
         self.mayor_seq[self.nombre] = self.seq
+        self._guardar_seq()
         self._recalcular()
         print(f"[{self.nombre}] emito LSA propio (seq={self.seq}, enlaces={enlaces}) e inundo a mis vecinos")
         self._inundar(lsa, excepto=None)
@@ -153,6 +184,15 @@ class Router:
         if origen is None or seq is None or not isinstance(enlaces, dict):
             return
         with self.candado:
+            # Eco de un LSA propio: si la red recuerda un seq mayor que el nuestro
+            # (típico tras un reinicio), lo superamos y re-anunciamos para que dejen
+            # de vernos "viejos". En un nodo hoja este eco no llega por split horizon,
+            # por eso la persistencia del seq es la que realmente lo cubre.
+            if origen == self.nombre:
+                if seq > self.seq:
+                    self.seq = seq
+                    self._emitir_lsa()
+                return
             # El seq corta los ciclos: solo se acepta una versión más nueva.
             if seq <= self.mayor_seq.get(origen, -1):
                 print(f"[{self.nombre}] LSA de {origen} (seq={seq}) descartado: duplicado o viejo")

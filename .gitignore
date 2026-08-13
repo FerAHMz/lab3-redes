@@ -1,5 +1,6 @@
 # Generados en ejecución
 *_tabla_enrutamiento.csv
+state/
 __pycache__/
 *.pyc
 
