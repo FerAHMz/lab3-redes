@@ -125,6 +125,7 @@ class Router:
         self.lsdb[self.nombre] = enlaces
         self.mayor_seq[self.nombre] = self.seq
         self._recalcular()
+        print(f"[{self.nombre}] emito LSA propio (seq={self.seq}, enlaces={enlaces}) e inundo a mis vecinos")
         self._inundar(lsa, excepto=None)
 
     def _procesar_lsa(self, mensaje):
@@ -137,17 +138,21 @@ class Router:
         with self.candado:
             # El seq corta los ciclos: solo se acepta una versión más nueva.
             if seq <= self.mayor_seq.get(origen, -1):
+                print(f"[{self.nombre}] LSA de {origen} (seq={seq}) descartado: duplicado o viejo")
                 return
             self.mayor_seq[origen] = seq
             self.lsdb[origen] = dict(enlaces)
+            print(f"[{self.nombre}] LSA de {origen} (seq={seq}) aceptado; recibido de {emisor}")
             self._recalcular()
             # El ttl es el respaldo contra LSAs que sobreviven al control de seq.
             ttl = mensaje.get("ttl", TTL_LSA) - 1
             if ttl <= 0:
+                print(f"[{self.nombre}] LSA de {origen} (seq={seq}) no reenviado: ttl agotado")
                 return
             reenvio = dict(mensaje)
             reenvio["ttl"] = ttl
             reenvio["from"] = self.nombre
+            print(f"[{self.nombre}] reenvío (flooding) LSA de {origen} (seq={seq}) a mis vecinos")
             self._inundar(reenvio, excepto=emisor)
 
     def _inundar(self, lsa, excepto):
